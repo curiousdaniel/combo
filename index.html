@@ -67,262 +67,384 @@
   <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
 <!-- Replace your existing text/babel script tag OPENING line with: -->
-<script
-  type="text/babel"
-  data-presets="env,react"
-  data-plugins="syntax-bigint,proposal-optional-chaining,proposal-nullish-coalescing-operator,proposal-numeric-separator">
-    const { useState, useEffect, useMemo, useRef } = React;
+<script type="text/babel" data-presets="env,react">
+  const { useState, useEffect, useMemo, useRef } = React;
 
-    // ---------- Helpers ----------
-    function formatMoney(n) {
-      if (n == null) return "";
-      if (Number.isNaN(n)) return "";
-      if (!Number.isFinite(n)) return "∞";
-      const rounded = Math.round(n);
-      return rounded.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  // ---------- Helpers ----------
+  function formatMoney(n) {
+    if (n == null) return "";
+    if (Number.isNaN(n)) return "";
+    if (!Number.isFinite(n)) return "∞";
+    var rounded = Math.round(n);
+    return rounded.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  }
+  function nowMs() { return Date.now(); }
+  function makeId(prefix) {
+    prefix = prefix || "b";
+    return prefix + "_" + Math.random().toString(36).slice(2,9);
+  }
+  function parseChatToBid(text) {
+    var spanMatch = text.match(/(\d+)\s*(?:units?|loaders?|items?|pcs?)/i);
+    var moneyMatch = text.replace(/[, ]/g, "").match(/\$?([0-9]+(?:\.[0-9]+)?)(k|m)?/i);
+    var span = spanMatch ? parseInt(spanMatch[1],10) : undefined;
+    var value;
+    if (moneyMatch) {
+      var base = parseFloat(moneyMatch[1]);
+      var mul = (moneyMatch[2] && moneyMatch[2].toLowerCase() === "m") ? 1000000 :
+                (moneyMatch[2] && moneyMatch[2].toLowerCase() === "k") ? 1000 : 1;
+      value = Math.round(base * mul);
     }
-    function nowMs() { return Date.now(); }
-    function makeId(prefix="b") { return prefix + "_" + Math.random().toString(36).slice(2,9); }
-    function parseChatToBid(text) {
-      const spanMatch = text.match(/(\d+)\s*(?:units?|loaders?|items?|pcs?)/i);
-      const moneyMatch = text.replace(/[, ]/g, "").match(/\$?([0-9]+(?:\.[0-9]+)?)(k|m)?/i);
-      const span = spanMatch ? parseInt(spanMatch[1],10) : undefined;
-      let value;
-      if (moneyMatch) {
-        const base = parseFloat(moneyMatch[1]);
-        const mult = moneyMatch[2]?.toLowerCase() === "m" ? 1_000_000 : moneyMatch[2]?.toLowerCase() === "k" ? 1_000 : 1;
-        value = Math.round(base * mult);
+    return { span: span, value: value };
+  }
+  function parseLotSelection(input) {
+    var out = [];
+    var tokens = input.split(/[\,\s]+/).filter(Boolean);
+    for (var t=0; t<tokens.length; t++) {
+      var token = tokens[t];
+      var m = token.match(/^(\d+)-(\d+)$/);
+      if (m) {
+        var a = parseInt(m[1],10), b = parseInt(m[2],10);
+        var lo = Math.min(a,b), hi = Math.max(a,b);
+        for (var i=lo; i<=hi; i++) out.push(i);
+      } else if (/^\d+$/.test(token)) {
+        out.push(parseInt(token,10));
       }
-      return { span, value };
     }
-    function parseLotSelection(input) {
-      const out=[];
-      for (const token of input.split(/[\,\s]+/).filter(Boolean)) {
-        const m = token.match(/^(\d+)-(\d+)$/);
-        if (m) { const a=+m[1], b=+m[2]; for (let i=Math.min(a,b); i<=Math.max(a,b); i++) out.push(i); }
-        else if (/^\d+$/.test(token)) out.push(+token);
+    // unique, keep order
+    var seen = {};
+    var dedup = [];
+    for (var j=0;j<out.length;j++){ if(!seen[out[j]]){ seen[out[j]]=true; dedup.push(out[j]); } }
+    return dedup;
+  }
+  // Set helpers (no BigInt)
+  function setFromIdx(indices) { var s=new Set(); for (var i=0;i<indices.length;i++) s.add(indices[i]); return s; }
+  function setIntersects(a,b) { for (var v of a) { if (b.has(v)) return true; } return false; }
+
+  // Basic CSV parser
+  function parseCSV(text) {
+    var rows=[], row=[], cell="", inQ=false, i=0;
+    while(i<text.length) {
+      var ch=text[i];
+      if (inQ) {
+        if (ch === '"') {
+          if (text[i+1] === '"') { cell+='"'; i+=2; continue; }
+          inQ=false; i++; continue;
+        }
+        cell+=ch; i++; continue;
+      } else {
+        if (ch === '"') { inQ=true; i++; continue; }
+        if (ch === ',') { row.push(cell.trim()); cell=""; i++; continue; }
+        if (ch === '\n' || ch === '\r') { if (ch==='\r' && text[i+1]==='\n') i++; row.push(cell.trim()); rows.push(row); row=[]; cell=""; i++; continue; }
+        cell+=ch; i++; continue;
       }
-      return Array.from(new Set(out));
     }
-    function maskFromIdx(indices) { let m=0n; for (const i of indices) m|=(1n<<BigInt(i)); return m; }
-    function overlaps(a,b) { return (a & b) !== 0n; }
-    function parseCSV(text) {
-      const rows=[]; let row=[], cell="", inQ=false; let i=0;
-      while (i<text.length) {
-        const ch=text[i];
-        if (inQ) {
-          if (ch === '"') { if (text[i+1] === '"') { cell+='"'; i+=2; continue; } inQ=false; i++; continue; }
-          cell+=ch; i++; continue;
-        } else {
-          if (ch === '"') { inQ=true; i++; continue; }
-          if (ch === ',') { row.push(cell.trim()); cell=""; i++; continue; }
-          if (ch === '\n' || ch === '\r') { if (ch==='\\r' && text[i+1]==='\\n') i++; row.push(cell.trim()); rows.push(row); row=[]; cell=""; i++; continue; }
-          cell+=ch; i++; continue;
+    if (cell.length || inQ || row.length) { row.push(cell.trim()); rows.push(row); }
+    return rows.filter(function(r){ return r.some(function(c){ return c.length;});});
+  }
+
+  // ---------- SIMU-OR Engine ----------
+  function SimuOrEngine(N) {
+    this.N = N;
+    this.REV = Array(N+1).fill(0);
+    this.lastWin = Array.from({length:N+1}, function(){ return {bidId:null, span:0}; });
+    this.bids = new Map();
+  }
+  SimuOrEngine.prototype.placeBid = function(b) {
+    this.bids.set(b.id,b);
+    var newREV = this.REV.slice();
+    var s=b.span, v=b.value;
+    for (var x=s; x<=this.N; x++) {
+      var threshold = this.REV[x]-this.REV[x-s];
+      if (v > threshold) { newREV[x]=v+this.REV[x-s]; this.lastWin[x]={bidId:b.id, span:s}; }
+    }
+    this.REV = newREV;
+  };
+  SimuOrEngine.prototype.currentWinningBidIds = function() {
+    var out=[], x=this.N, guard=new Set();
+    while(x>0){
+      var lw=this.lastWin[x];
+      if(!lw || !lw.bidId || lw.span<=0) break;
+      if(guard.has(lw.bidId)) break;
+      out.push(lw.bidId); guard.add(lw.bidId); x-=lw.span;
+    }
+    return out;
+  };
+  SimuOrEngine.prototype.WL = function(span) {
+    if (span<1||span>this.N) return Infinity;
+    return this.REV[this.N] - this.REV[this.N - span];
+  };
+  SimuOrEngine.prototype.DL = function(span) {
+    if (span<1||span>this.N) return Infinity;
+    var min=Infinity;
+    for (var i=span;i<=this.N;i++) {
+      var diff=this.REV[i]-this.REV[i-span];
+      if (diff<min) min=diff;
+    }
+    return min;
+  };
+
+  // ---------- MISU Engine (OR/XOR exact, no BigInt) ----------
+  function MisuEngine(items, xor) {
+    this.items = items || [];
+    this.bids = new Map();
+    this.lastWinners = [];
+    this.lastRevenue = 0;
+    this.xor = !!xor;
+  }
+  MisuEngine.prototype.setItems = function(items) {
+    this.items = items || [];
+    this.bids.clear();
+    this.lastWinners = [];
+    this.lastRevenue = 0;
+  };
+  MisuEngine.prototype.setXor = function(flag) { this.xor = !!flag; this.solveAll(); };
+  MisuEngine.prototype.placeBid = function(b){ this.bids.set(b.id,b); this.solveAll(); };
+
+  // pool elements: { id, bidderId, itemsSet:Set<int>, items:int[], value:number }
+  MisuEngine.prototype.solve = function(pool, forbidSet, bannedBidders) {
+    forbidSet = forbidSet || new Set();
+    bannedBidders = bannedBidders || new Set();
+
+    var opts = pool.filter(function(b){
+      return !setIntersects(b.itemsSet, forbidSet) && !bannedBidders.has(b.bidderId);
+    }).sort(function(a,b){ return b.value - a.value; });
+
+    var bestVal=0, best=[];
+    var seen = new Map();
+    var xorFlag = this.xor;
+
+    function dfs(i, usedSet, usedBidders, val, picks) {
+      var key = i + "|" + Array.from(usedSet).sort().join(",") + "|" + Array.from(usedBidders).sort().join(",");
+      var prev = seen.get(key);
+      if (prev != null && prev >= val) return;
+      seen.set(key, val);
+
+      // simple UB: remaining values sum
+      var ub = val;
+      for (var k=i;k<opts.length;k++) ub += opts[k].value;
+      if (ub <= bestVal) return;
+
+      if (i >= opts.length) {
+        if (val > bestVal) { bestVal = val; best = picks.slice(); }
+        return;
+      }
+      // skip
+      dfs(i+1, usedSet, usedBidders, val, picks);
+
+      var o = opts[i];
+      if (!setIntersects(usedSet, o.itemsSet) && !bannedBidders.has(o.bidderId)) {
+        if (!xorFlag || !usedBidders.has(o.bidderId)) {
+          var nextUsed = new Set(usedSet);
+          for (var v of o.itemsSet) nextUsed.add(v);
+          var nextBidders = xorFlag ? new Set(usedBidders).add(o.bidderId) : usedBidders;
+          dfs(i+1, nextUsed, nextBidders, val + o.value, picks.concat([o.id]));
         }
       }
-      if (cell.length || inQ || row.length) { row.push(cell.trim()); rows.push(row); }
-      return rows.filter(r => r.some(c => c.length));
+    }
+    dfs(0, new Set(), new Set(), 0, []);
+    return { value: bestVal, picks: best };
+  };
+
+  MisuEngine.prototype.solveAll = function() {
+    var pool = Array.from(this.bids.values());
+    var res = this.solve(pool, new Set(), new Set());
+    this.lastRevenue = res.value;
+    this.lastWinners = res.picks;
+  };
+  MisuEngine.prototype.winningIds = function(){ return this.lastWinners; };
+  MisuEngine.prototype.revenue = function(){ return this.lastRevenue; };
+
+  MisuEngine.prototype.WL_forBid = function(b) {
+    var pool = Array.from(this.bids.values());
+    var base = this.solve(pool, new Set(), new Set()).value;
+    var banned = this.xor ? new Set([b.bidderId]) : new Set();
+    // forbid the items in S
+    var revRest = this.solve(pool, b.itemsSet, banned).value;
+    return base - revRest;
+  };
+  MisuEngine.prototype.DL_forBid = function(b) {
+    // Only bids entirely within S; also exclude same bidder in XOR case
+    var pool = Array.from(this.bids.values()).filter(function(x){
+      // x inside S if x.itemsSet ⊆ b.itemsSet
+      for (var v of x.itemsSet) { if (!b.itemsSet.has(v)) return false; }
+      if (this.xor && x.bidderId === b.bidderId) return false;
+      return true;
+    }.bind(this));
+    return this.solve(pool, new Set(), new Set()).value;
+  };
+
+  // Use PRELOAD_CSV if caller embedded it; otherwise empty
+  var PRELOAD_CSV_LOCAL = (typeof PRELOAD_CSV !== "undefined") ? PRELOAD_CSV : "";
+
+  function App() {
+    const [mode,setMode] = useState("MISU");
+    const [xor,setXor] = useState(true);
+
+    // SIMU
+    const [units,setUnits] = useState(8);
+    const [simu,setSimu] = useState(()=>new SimuOrEngine(8));
+    const [mySimu,setMySimu] = useState([]);
+    const [simuFeed,setSimuFeed] = useState([]);
+    const [span,setSpan] = useState(2);
+    const [amount,setAmount] = useState(52000);
+    const [autoSim,setAutoSim] = useState(false);
+    const [chat,setChat] = useState("Increase my bid: 4 units for $52k");
+    const [myId] = useState(()=> "You_" + Math.random().toString(36).slice(2,6));
+    const startRef = useRef(nowMs());
+
+    useEffect(function(){
+      const eng=new SimuOrEngine(units); setSimu(eng); setMySimu([]); setSimuFeed([]); setSpan(function(s){ return Math.max(1,Math.min(units,s)); });
+    },[units]);
+    useEffect(function(){
+      if(!autoSim||mode!=="SIMU") return;
+      const h=setInterval(simulateExternalSimu,1200);
+      return function(){ clearInterval(h); };
+    },[autoSim,mode,simu]);
+
+    function placeSimu(b){ simu.placeBid(b); setSimu(Object.assign(Object.create(Object.getPrototypeOf(simu)),simu)); setSimuFeed(function(f){ return [b].concat(f).slice(0,200); }); }
+    function submitSimu(){ if(span<1||span>units||amount<=0) return; const b={ id:makeId("my"), bidderId:myId, span:span, value:amount, time: nowMs()-startRef.current }; placeSimu(b); setMySimu(function(x){ return [b].concat(x); }); }
+    function simulateExternalSimu(){
+      const s=Math.max(1,Math.min(units,Math.floor(Math.random()*units)+1));
+      const wl=simu.WL(s);
+      const bumps=[500,1000,2500,5000,7500,10000];
+      const v=Math.max(1000,(Number.isFinite(wl)?wl:0)+bumps[Math.floor(Math.random()*bumps.length)]);
+      placeSimu({ id:makeId("ext"), bidderId:"Bidder_"+Math.random().toString(36).slice(2,6), span:s, value:v, time: nowMs()-startRef.current });
     }
 
-    // ---------- SIMU-OR Engine ----------
-    class SimuOrEngine {
-      constructor(N) {
-        this.N = N;
-        this.REV = Array(N+1).fill(0);
-        this.lastWin = Array.from({length:N+1},()=>({bidId:null,span:0}));
-        this.bids = new Map();
-      }
-      placeBid(b) {
-        this.bids.set(b.id,b);
-        const newREV = this.REV.slice();
-        const s=b.span, v=b.value;
-        for (let x=s;x<=this.N;x++) {
-          const threshold=this.REV[x]-this.REV[x-s];
-          if (v>threshold) { newREV[x]=v+this.REV[x-s]; this.lastWin[x]={bidId:b.id,span:s}; }
+    const winnersSimu = useMemo(function(){ return new Set(simu.currentWinningBidIds()); },[simu]);
+    const wlSpan=simu.WL(span); const dlSpan=simu.DL(span); const toWL=Math.max(0,(Number.isFinite(wlSpan)?wlSpan:Infinity)+1-amount);
+    const revN = simu.REV[Math.min(simu.N,units)] || 0;
+    function statusForSimu(b){ if(winnersSimu.has(b.id)) return "WINNING"; const dl=simu.DL(b.span); return b.value>=dl? "LIVE":"DEAD"; }
+    function parseAndSubmitChat(){ var p=parseChatToBid(chat); if(p.span&&p.value){ setSpan(p.span); setAmount(p.value); submitSimu(); } }
+
+    // MISU
+    const [items,setItems] = useState([]);
+    const [misu] = useState(()=>new MisuEngine([], true));
+    const [misuFeed,setMisuFeed] = useState([]);
+    const [sel,setSel] = useState("1,2,3");
+    const [bundle,setBundle] = useState(2500);
+
+    useEffect(function(){
+      try {
+        var rows = parseCSV(PRELOAD_CSV_LOCAL);
+        if (rows.length) {
+          var header = rows[0].map(function(h){ return h.toLowerCase(); });
+          var data = rows.slice(1);
+          var titleIdx = -1, imgIdx = -1;
+          for (var i=0;i<header.length;i++){ if (titleIdx<0 && /title/.test(header[i])) titleIdx=i; if (imgIdx<0 && /(img|image|url)/.test(header[i])) imgIdx=i; }
+          var parsed = data.slice(0,48).map(function(r,i){
+            var t = (titleIdx>=0 ? r[titleIdx] : (r[0]||("Lot "+(i+1))));
+            var im = (imgIdx>=0 ? r[imgIdx] : "");
+            return { id:i, title: t || ("Lot "+(i+1)), img: im || undefined };
+          });
+          setItems(parsed); misu.setItems(parsed); misu.setXor(xor);
         }
-        this.REV = newREV;
-      }
-      currentWinningBidIds() { const out=[]; let x=this.N; const guard=new Set(); while(x>0){ const lw=this.lastWin[x]; if(!lw||!lw.bidId||lw.span<=0) break; if(guard.has(lw.bidId)) break; out.push(lw.bidId); guard.add(lw.bidId); x-=lw.span; } return out; }
-      WL(span) { if(span<1||span>this.N) return Infinity; return this.REV[this.N]-this.REV[this.N-span]; }
-      DL(span) { if(span<1||span>this.N) return Infinity; let min=Infinity; for(let i=span;i<=this.N;i++) min=Math.min(min,this.REV[i]-this.REV[i-span]); return min; }
+      } catch(e) { console.error("CSV preload error", e); }
+    },[]);
+    useEffect(function(){ misu.setItems(items); misu.setXor(xor); setMisuFeed(function(f){return f.slice();}); },[items,xor,misu]);
+
+    function addMisuBidFromSelection(selStr, value){
+      var idxs = parseLotSelection(selStr).map(function(n){return n-1;}).filter(function(i){return i>=0 && i<items.length;});
+      if (idxs.length===0) return;
+      var itemsSet = setFromIdx(idxs);
+      var b = { id:makeId("misu"), bidderId:myId, itemsSet: itemsSet, items: idxs, value: value, time: nowMs()-startRef.current };
+      misu.placeBid(b); setMisuFeed(function(f){ return [b].concat(f); });
     }
-
-    // ---------- MISU Engine (OR/XOR exact) ----------
-    class MisuEngine {
-      constructor(items=[], xor=false) { this.items=items; this.bids=new Map(); this.lastWinners=[]; this.lastRevenue=0; this.xor=xor; }
-      setItems(items) { this.items=items; this.bids.clear(); this.lastWinners=[]; this.lastRevenue=0; }
-      setXor(flag) { this.xor=flag; this.solveAll(); }
-      placeBid(b) { this.bids.set(b.id,b); this.solveAll(); }
-      solve(pool, forbidMask=0n, bannedBidders=new Set()) {
-        const opts = pool.filter(b=>!overlaps(b.itemsMask,forbidMask) && !bannedBidders.has(b.bidderId)).sort((a,b)=>b.value-a.value);
-        let bestVal=0; let best=[];
-        const seen=new Map();
-        const xorFlag=this.xor;
-        function dfs(i, used, usedBidders, val, picks) {
-          const key = i+"|"+used.toString()+"|"+Array.from(usedBidders).sort().join(',');
-          if (seen.has(key) && seen.get(key) >= val) return; seen.set(key,val);
-          let ub=val; for(let k=i;k<opts.length;k++) ub+=opts[k].value; if(ub<=bestVal) return;
-          if (i>=opts.length) { if (val>bestVal) { bestVal=val; best=picks.slice(); } return; }
-          // skip
-          dfs(i+1, used, usedBidders, val, picks);
-          const o=opts[i];
-          if (!overlaps(used,o.itemsMask) && !bannedBidders.has(o.bidderId)) {
-            if (!xorFlag || !usedBidders.has(o.bidderId)) {
-              const nextUsed = xorFlag ? new Set(usedBidders).add(o.bidderId) : usedBidders;
-              dfs(i+1, used|o.itemsMask, nextUsed, val+o.value, picks.concat([o.id]));
-            }
-          }
-        }
-        dfs(0,0n,new Set(),0,[]);
-        return { value: bestVal, picks: best };
+    function simulateExternalMisu(){
+      if(items.length===0) return;
+      var pick = Math.max(1,Math.min(4,Math.floor(Math.random()*4)+1));
+      var pool=[]; for (var i=0;i<items.length;i++) pool.push(i);
+      var idxs=[];
+      while(idxs.length<pick && pool.length){
+        var j=Math.floor(Math.random()*pool.length);
+        idxs.push(pool[j]); pool.splice(j,1);
       }
-      solveAll() { const pool=Array.from(this.bids.values()); const res=this.solve(pool,0n,new Set()); this.lastRevenue=res.value; this.lastWinners=res.picks; }
-      winningIds() { return this.lastWinners; }
-      revenue() { return this.lastRevenue; }
-      WL_forBid(b) { const pool=Array.from(this.bids.values()); const revBase=this.solve(pool,0n,new Set()).value; const banned=this.xor? new Set([b.bidderId]) : new Set(); const revRest=this.solve(pool,b.itemsMask,banned).value; return revBase - revRest; }
-      DL_forBid(b) { const pool=Array.from(this.bids.values()).filter(x => (x.itemsMask & ~b.itemsMask)===0n && (!this.xor || x.bidderId !== b.bidderId)); return this.solve(pool,0n,new Set()).value; }
+      var itemsSet=setFromIdx(idxs);
+      var dummy={ id:"dummy", bidderId:"Bidder_"+Math.random().toString(36).slice(2,6), itemsSet:itemsSet, items:idxs, value:0, time:0 };
+      var wl=misu.WL_forBid(dummy);
+      var bumps=[200,400,800,1200,2500];
+      var val=Math.max(100,(Number.isFinite(wl)?wl:0)+bumps[Math.floor(Math.random()*bumps.length)]);
+      var b={ id:makeId("ext"), bidderId:dummy.bidderId, itemsSet:itemsSet, items:idxs, value:val, time: nowMs()-startRef.current };
+      misu.placeBid(b); setMisuFeed(function(f){ return [b].concat(f); });
     }
+    var misuWinners = misu.winningIds(); var misuRevenue = misu.revenue();
 
-    // ---------- Embedded CSV ----------
-    const PRELOAD_CSV = atob("bG90LHRpdGxlLGltYWdlCjEwMCxEQ0kgRGlzaCBCb3R0b20gMzA0IFN0YWlubGVzcyBUYW5rIDUwMCBVU0csCjEwMSxQcmVjaXNpb24gU3RhaW5sZXNzIDcwMCBMaXRlciBCaW9yZWFjdG9yIDMxNiBTUywKMTAyLElCQyBTdGFpbmxlc3MgMzUwIEdhbGxvbiBUb3RlLAoxMDMsVHJhbnN0b3JlIFN0YWlubGVzcyAzNTAgR2FsbG9uIFRvdGUsCjEwNCwxMDAwIExpdGVyIFZhcmlhYmxlIFN0YWlubGVzcyBXaW5lIFRhbmsgV2l0aCBTdGFuZCwKMTA1LE1pbm94IFN0YWlubGVzcyBWYXJpYWJsZSAxMDAwIExpdGVyIFdpbmUgVGFuaywKMTA2LCgzKSBTdGFpbmxlc3MgNTUgR2FsbG9uIERydW1zLAoxMDcsKDQpIFN0YWlubGVzcyA1NSBHYWxsb24gRHJ1bXMsCjEwOCxTdGFpbmxlc3MgVGFuayAxNTAwIEdhbGxvbnMsCjEwOSw3QkJMIFN0YWlubGVzcyBKYWNrZXRlZCBCcml0ZSBCZWVyIFRhbmssCjExMSxDcmFmdHNtYW4gMSBIUCBBaXIgY29tcHJlc3NvciAxMTBWLAoxMTIsR2FyZG5lci1EZW52ZXIgRWxlY3RyYS1TY3JldyBBaXIgQ29tcHJlc3NvciwKMTEzLE5pdHJvZ2VuL0MwMiBFdmFwb3JhdG9yLVZhcG9yaXpvciBUb3dlciwKMTE0LEcmRCBHbHljb2wgQ2hpbGxlciAxMEhQLAoxMTUsTWljcm9tYXRpYyBHbHljb2wgQ2hpbGxlciAxLzMgSFAsCjExNixJbmR1c3RyaWFsIEhlYXRlciwKMTE3LENvdXNpbnMgU3RyZXRjaCBQYWxsZXQgUmFwcGVyLAoxMTgsUGhvZW5peCBTdHJldGNoIFBhbGxldCBXcmFwcGVyLAoxMTksR3J1bmRmb3MgV2F0ZXIgUHVtcHMgYW5kIENvbnRyb2xzLAoxMjAsUGFubmRvcmYgUHJvZ3Jlc3NpdmUgQ2F2aXR5IFB1bXAsCjEyMSxKb2huc29uIFBvc2l0aXZlIERpc3BsYWNlbWVudCBQdW1wICAzIiwKMTIyLEFtcGNvIENJUCBQdW1wIDNIUCwKMTIzLENoZXJyeSBCdXJyZWxsIFByb2dyZXNzaXZlIENhdml0eSBQdW1wIDEuNSBIcCwKMTI0LExpdmVyYW5pIFJvdGFyeSBMb2JlIFB1bXAgMS4ySHAsCjEyNSxKYWJzY28gRmxleGlibGUgSW1wZWxsZXIgUHVtcCAxSFAsCjEyNixBbWVyaWNyYWZ0IEFpciBCbG93ZXIgMUhwLAoxMjcsKDIpIFZhY3V1bSBQdW1wcywKMTI4LCgzKSBDb25kZW5zYXRlIFB1bXBzLAoxMjksTWFzdGVyZmxleCBQZXJpc3RhbHRpYyBQdW1wIDc1MjktMTAsCjEzMCxEYXJsZXkgRmlyZSBTdXBwcmVzc2lvbiBUYW5rIGFuZCBQdW1wIFN5c3RlbSwKMTMxLEFtcGNvIFBvcnRhYmxlIENlbnRyaWZ1Z2FsIFB1bXAgMS41SFAsCjEzMixNY0NsYWluIE96b25lIFNhbml0emVyLAoxMzMsT01BQyBHcmFwZSBEZXN0ZW1tZXIgQ3J1c2hlciwKMTM0LCgyKSBXaW5lIEJhcnJlbCBUb3BwaW5nIEtlZ3MsCjEzNSxCdW9uIFZpbm8gU3VwZXIgSmV0IFBhZCBXaW5lIEZpbHRlciwKMTM2LDggLSA1IEdhbGxvbiBHbGFzcyBDYXJib3lzIEZlcm1lbnRlcnMsCjEzNywoMikgU3BpZWRlbCAxMCBHYWxsb24gRmVybWVudGVycywKMTM4LEdXIEtlbnQgMjAiIFN0YWlubGVzcyBDYXJ0cmlkZ2UgRmlsdGVyLAoxMzksSVBST1MgU3RhaW5sZXNzIFBsYXRlIEFuZCBGcmFtZSBIZWF0IEV4Y2hhbmdlciwKMTQwLCg2KSAxNSBHYWxsb24gQmFsbCBMb2NrIFN0YWlubGVzcyBLZWdzLAoxNDEsKDIpIDE1IEdhbGxvbiBTdGFpbmxlc3MgQmFsbCBMb2NrIENhcmJvbmF0aW9uIEtlZ3MsCjE0Miw1IEdhbGxvbiBCYWxsIExvY2sgS2VnIGFuZCBCYWxsIExvY2sgTGlkcywKMTQzLCg5KSAyLjk1IFVTRyBTY2hhZWZlciBGcmVzaCBLZWdzLAoxNDQsMTUuNSBHYWxsb24gS2VnZ2xlIGFuZCBNYXNoIFR1biwKMTQ1LE9yYmlzcGhlcmUgMzYyNCBQcm9Ccml4IFBsdXMgU3lzdGVtLAoxNDYsTG90IG9mIFN0YWlubGVzcyBUcmktQ2xhbXAgVmlicmF0aW9uIElzb2xhdGlvbiBQaXBlcywKMTQ3LExvdCBvZiBTdGFpbmxlc3MgV2VsZC1vbiBUcmktQ2xhbXAgRml0dGluZ3MsCjE0OCwyIiBTdGFpbmxlc3MgV2VsZC1vbiBUcmktQ2xhbXAgRml0dGluZ3MvZmVycnVsZXMs");
+    // Wire topbar controls
+    useEffect(function(){
+      var modeSel = document.getElementById('modeSelect');
+      var xorWrap = document.getElementById('xorWrap');
+      var xorT = document.getElementById('xorToggle');
+      if (modeSel) modeSel.value = mode;
+      if (xorWrap) xorWrap.style.display = mode==="MISU" ? "flex" : "none";
+      if (xorT) xorT.checked = xor;
+      function onMode(e){ setMode(e.target.value); }
+      function onXor(e){ setXor(e.target.checked); }
+      modeSel && modeSel.addEventListener('change', onMode);
+      xorT && xorT.addEventListener('change', onXor);
+      return function(){
+        modeSel && modeSel.removeEventListener('change', onMode);
+        xorT && xorT.removeEventListener('change', onXor);
+      };
+    },[mode,xor]);
 
-    function App() {
-      const [mode,setMode] = useState("MISU");
-      const [xor,setXor] = useState(true);
-
-      // SIMU
-      const [units,setUnits] = useState(8);
-      const [simu,setSimu] = useState(()=>new SimuOrEngine(8));
-      const [mySimu,setMySimu] = useState([]);
-      const [simuFeed,setSimuFeed] = useState([]);
-      const [span,setSpan] = useState(2);
-      const [amount,setAmount] = useState(52000);
-      const [autoSim,setAutoSim] = useState(false);
-      const [chat,setChat] = useState("Increase my bid: 4 units for $52k");
-      const [myId] = useState(()=> "You_" + Math.random().toString(36).slice(2,6));
-      const startRef = useRef(nowMs());
-
-      useEffect(()=>{
-        const eng=new SimuOrEngine(units); setSimu(eng); setMySimu([]); setSimuFeed([]); setSpan(s=>Math.max(1,Math.min(units,s)));
-      },[units]);
-      useEffect(()=>{ if(!autoSim||mode!=="SIMU") return; const h=setInterval(simulateExternalSimu,1200); return ()=>clearInterval(h); },[autoSim,mode,simu]);
-
-      function placeSimu(b){ simu.placeBid(b); setSimu(Object.assign(Object.create(Object.getPrototypeOf(simu)),simu)); setSimuFeed(f=>[b,...f].slice(0,200)); }
-      function submitSimu(){ if(span<1||span>units||amount<=0) return; const b={ id:makeId("my"), bidderId:myId, span, value:amount, time: nowMs()-startRef.current }; placeSimu(b); setMySimu(x=>[b,...x]); }
-      function simulateExternalSimu(){ const s=Math.max(1,Math.min(units,Math.floor(Math.random()*units)+1)); const wl=simu.WL(s); const bump=[500,1000,2500,5000,7500,10000][Math.floor(Math.random()*6)]; const v=Math.max(1000,(Number.isFinite(wl)?wl:0)+bump); placeSimu({ id:makeId("ext"), bidderId:"Bidder_"+Math.random().toString(36).slice(2,6), span:s, value:v, time: nowMs()-startRef.current }); }
-
-      const winnersSimu = useMemo(()=> new Set(simu.currentWinningBidIds()),[simu]);
-      const wlSpan=simu.WL(span); const dlSpan=simu.DL(span); const toWL=Math.max(0,(Number.isFinite(wlSpan)?wlSpan:Infinity)+1-amount);
-      const revN = simu.REV[Math.min(simu.N,units)] ?? 0;
-      function statusForSimu(b){ if(winnersSimu.has(b.id)) return "WINNING"; const dl=simu.DL(b.span); return b.value>=dl? "LIVE":"DEAD"; }
-      function parseAndSubmitChat(){ const p=parseChatToBid(chat); if(p.span&&p.value){ setSpan(p.span); setAmount(p.value); submitSimu(); } }
-
-      // MISU
-      const [items,setItems] = useState([]);
-      const [misu] = useState(()=>new MisuEngine([], true));
-      const [misuFeed,setMisuFeed] = useState([]);
-      const [sel,setSel] = useState("1,2,3");
-      const [bundle,setBundle] = useState(2500);
-
-      useEffect(()=>{
-        try {
-          const rows = parseCSV(PRELOAD_CSV);
-          if (rows.length) {
-            const header = rows[0].map(h=>h.toLowerCase()); const data = rows.slice(1);
-            const titleIdx = header.findIndex(h=>/title/.test(h)); const imgIdx = header.findIndex(h=>/img|image|url/.test(h));
-            const parsed = data.slice(0,48).map((r,i)=>({ id:i, title:(r[titleIdx]??r[0]??`Lot ${i+1}`), img: (imgIdx>=0? r[imgIdx] : "") || undefined }));
-            setItems(parsed); misu.setItems(parsed); misu.setXor(xor);
-          }
-        } catch(e) { console.error("CSV preload error", e); }
-      },[]);
-      useEffect(()=>{ misu.setItems(items); misu.setXor(xor); setMisuFeed(f=>f.slice()); },[items,xor,misu]);
-
-      function addMisuBidFromSelection(sel, value){
-        const idxs = parseLotSelection(sel).map(n=>n-1).filter(i=>i>=0 && i<items.length);
-        if (idxs.length===0) return;
-        const b = { id:makeId("misu"), bidderId:myId, itemsMask: maskFromIdx(idxs), items: idxs, value, time: nowMs()-startRef.current };
-        misu.placeBid(b); setMisuFeed(f=>[b,...f]);
-      }
-      function simulateExternalMisu(){
-        if(items.length===0) return;
-        const pick = Math.max(1,Math.min(4,Math.floor(Math.random()*4)+1));
-        const pool=[...Array(items.length).keys()]; const idxs=[]; while(idxs.length<pick && pool.length){ const j=Math.floor(Math.random()*pool.length); idxs.push(pool[j]); pool.splice(j,1); }
-        const mask=maskFromIdx(idxs); const dummy={ id:"dummy", bidderId:"Bidder_"+Math.random().toString(36).slice(2,6), itemsMask:mask, items:idxs, value:0, time:0 };
-        const wl=misu.WL_forBid(dummy); const bump=[200,400,800,1200,2500][Math.floor(Math.random()*5)]; const val=Math.max(100,(Number.isFinite(wl)?wl:0)+bump);
-        const b={ id:makeId("ext"), bidderId:dummy.bidderId, itemsMask:mask, items:idxs, value:val, time: nowMs()-startRef.current };
-        misu.placeBid(b); setMisuFeed(f=>[b,...f]);
-      }
-      const misuWinners = misu.winningIds(); const misuRevenue = misu.revenue();
-
-      // Wire topbar controls
-      useEffect(()=>{
-        const modeSel = document.getElementById('modeSelect'); const xorWrap = document.getElementById('xorWrap'); const xorT = document.getElementById('xorToggle');
-        modeSel.value = mode;
-        xorWrap.style.display = mode==="MISU" ? "flex" : "none";
-        xorT.checked = xor;
-        const onMode = (e)=> setMode(e.target.value);
-        const onXor = (e)=> setXor(e.target.checked);
-        modeSel.addEventListener('change', onMode);
-        xorT.addEventListener('change', onXor);
-        return ()=>{ modeSel.removeEventListener('change', onMode); xorT.removeEventListener('change', onXor); }
-      },[mode,xor]);
-
-      return (
-        <div className="row">
-          {mode==="SIMU" ? (
-            <>
-              <div className="card">
-                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8}}>
-                  <div style={{fontWeight:700}}>Wheel Loaders</div>
-                  <div style={{fontSize:12, color:'var(--am-blue)'}}>SIMU-OR</div>
+    return (
+      <div className="row">
+        {mode==="SIMU" ? (
+          <>
+            <div className="card">
+              <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8}}>
+                <div style={{fontWeight:700}}>Wheel Loaders</div>
+                <div style={{fontSize:12, color:'var(--am-blue)'}}>SIMU-OR</div>
+              </div>
+              <img src="https://images.unsplash.com/photo-1591390240540-65b56a2b5a7a?q=80&w=1600&auto=format&fit=crop" alt="lot" style={{width:'100%', height:160, objectFit:'cover', borderRadius:12}}/>
+              <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginTop:12}}>
+                <div>
+                  <div style={{fontSize:13, color:'var(--muted)'}}>Total units in lot</div>
+                  <input className="input" type="number" min="1" max="200" value={units} onChange={function(e){ setUnits(Math.max(1,Math.min(200,parseInt(e.target.value||"1",10)))); }}/>
                 </div>
-                <img src="https://images.unsplash.com/photo-1591390240540-65b56a2b5a7a?q=80&w=1600&auto=format&fit=crop" alt="lot" style={{width:'100%', height:160, objectFit:'cover', borderRadius:12}}/>
-                <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginTop:12}}>
-                  <div>
-                    <div style={{fontSize:13, color:'var(--muted)'}}>Total units in lot</div>
-                    <input className="input" type="number" min="1" max="200" value={units} onChange={e=>setUnits(Math.max(1,Math.min(200,parseInt(e.target.value||"1",10))) )}/>
-                  </div>
-                  <div style={{display:'flex', alignItems:'flex-end'}}>
-                    <button className={"btn " + (autoSim?"btn-blue":"btn-orange")} onClick={()=>setAutoSim(s=>!s)}>{autoSim?"Auto-sim: ON":"Auto-sim: OFF"}</button>
-                  </div>
-                </div>
-                <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginTop:12}}>
-                  <div><div style={{fontSize:13, color:'var(--muted)'}}>Bid on bundle (units)</div><input className="input" type="number" min="1" max={units} value={span} onChange={e=>setSpan(Math.max(1,Math.min(units,parseInt(e.target.value||"1",10))))}/></div>
-                  <div><div style={{fontSize:13, color:'var(--muted)'}}>Your bid (total $)</div><input className="input" type="number" min="0" value={amount} onChange={e=>setAmount(Math.max(0,parseInt(e.target.value||"0",10)))}/></div>
-                </div>
-                <div style={{marginTop:8, fontSize:14}}>
-                  <div style={{display:'flex', justifyContent:'space-between'}}><span style={{color:'var(--muted)'}}>Winning level (WL) for {span}:</span><b>${formatMoney(wlSpan)}</b></div>
-                  <div style={{display:'flex', justifyContent:'space-between'}}><span style={{color:'var(--muted)'}}>Deadness level (DL) for {span}:</span><b>${formatMoney(dlSpan)}</b></div>
-                  <div style={{marginTop:4, color:'var(--am-blue)'}}>{toWL<=0? "At or above WL - should win if placed now." : "You are $"+formatMoney(toWL)+" below WL."}</div>
-                </div>
-                <div style={{display:'flex', gap:8, marginTop:12}}>
-                  <button className="btn btn-blue" style={{flex:1}} onClick={submitSimu}>Place bid</button>
-                  <button className="btn btn-orange" onClick={simulateExternalSimu}>Sim Opp</button>
-                </div>
-                <div className="card" style={{marginTop:12}}>
-                  <div style={{fontSize:13, color:'var(--muted)', marginBottom:6}}>Chat assistant</div>
-                  <div style={{display:'flex', gap:8}}>
-                    <input className="input" value={chat} onChange={e=>setChat(e.target.value)} placeholder="e.g., 4 units for $52k"/>
-                    <button className="btn btn-blue" onClick={parseAndSubmitChat}>Send</button>
-                  </div>
+                <div style={{display:'flex', alignItems:'flex-end'}}>
+                  <button className={"btn " + (autoSim?"btn-blue":"btn-orange")} onClick={function(){ setAutoSim(function(s){return !s;}); }}>{autoSim?"Auto-sim: ON":"Auto-sim: OFF"}</button>
                 </div>
               </div>
+              <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginTop:12}}>
+                <div><div style={{fontSize:13, color:'var(--muted)'}}>Bid on bundle (units)</div><input className="input" type="number" min="1" max={units} value={span} onChange={function(e){ setSpan(Math.max(1,Math.min(units,parseInt(e.target.value||"1",10)))); }}/></div>
+                <div><div style={{fontSize:13, color:'var(--muted)'}}>Your bid (total $)</div><input className="input" type="number" min="0" value={amount} onChange={function(e){ setAmount(Math.max(0,parseInt(e.target.value||"0",10))); }}/></div>
+              </div>
+              <div style={{marginTop:8, fontSize:14}}>
+                <div style={{display:'flex', justifyContent:'space-between'}}><span style={{color:'var(--muted)'}}>Winning level (WL) for {span}:</span><b>${formatMoney(wlSpan)}</b></div>
+                <div style={{display:'flex', justifyContent:'space-between'}}><span style={{color:'var(--muted)'}}>Deadness level (DL) for {span}:</span><b>${formatMoney(dlSpan)}</b></div>
+                <div style={{marginTop:4, color:'var(--am-blue)'}}>{toWL<=0? "At or above WL - should win if placed now." : "You are $"+formatMoney(toWL)+" below WL."}</div>
+              </div>
+              <div style={{display:'flex', gap:8, marginTop:12}}>
+                <button className="btn btn-blue" style={{flex:1}} onClick={submitSimu}>Place bid</button>
+                <button className="btn btn-orange" onClick={simulateExternalSimu}>Sim Opp</button>
+              </div>
+              <div className="card" style={{marginTop:12}}>
+                <div style={{fontSize:13, color:'var(--muted)', marginBottom:6}}>Chat assistant</div>
+                <div style={{display:'flex', gap:8}}>
+                  <input className="input" value={chat} onChange={function(e){ setChat(e.target.value); }} placeholder="e.g., 4 units for $52k"/>
+                  <button className="btn btn-blue" onClick={parseAndSubmitChat}>Send</button>
+                </div>
+              </div>
+            </div>
 
-              <div className="card">
-                <div style={{fontWeight:700, marginBottom:8}}>Bidder Feedback</div>
-                <div style={{display:'grid', gap:6, fontSize:14}}>
-                  <div style={{display:'flex', justifyContent:'space-between'}}><span>Total auction revenue (REV[N])</span><b>${formatMoney(revN)}</b></div>
-                  <div style={{display:'flex', justifyContent:'space-between'}}><span>Your selection</span><b>{span} units @ ${formatMoney(amount)}</b></div>
-                </div>
-                <div style={{marginTop:8}}>
-                  <div className="bar"><div style={{height:8, width: Math.min(100, Math.max(5, (amount / Math.max(1, Number.isFinite(wlSpan)? wlSpan:1)) * 100)) + '%', background: amount>=wlSpan? '#22c55e' : amount>=dlSpan? '#eab308' : '#ef4444'}}></div></div>
-                  <div style={{display:'flex', justifyContent:'space-between', fontSize:12, color:'var(--muted)', marginTop:4}}><span>0</span><span>WL ${formatMoney(wlSpan)}</span></div>
-                </div>
-                <div style={{marginTop:12}}>
-                  <div style={{fontWeight:600, fontSize:14, marginBottom:6}}>My Active Bids</div>
-                  <ul style={{listStyle:'none', padding:0, margin:0}}>
-                    {mySimu.length===0 && <li style={{color:'#6b7280', padding:'16px 0'}}>No bids yet.</li>}
-                    {mySimu.map(b=>{ const s=statusForSimu(b); return (
+            <div className="card">
+              <div style={{fontWeight:700, marginBottom:8}}>Bidder Feedback</div>
+              <div style={{display:'grid', gap:6, fontSize:14}}>
+                <div style={{display:'flex', justifyContent:'space-between'}}><span>Total auction revenue (REV[N])</span><b>${formatMoney(revN)}</b></div>
+                <div style={{display:'flex', justifyContent:'space-between'}}><span>Your selection</span><b>{span} units @ ${formatMoney(amount)}</b></div>
+              </div>
+              <div style={{marginTop:8}}>
+                <div className="bar"><div style={{height:8, width: Math.min(100, Math.max(5, (amount / Math.max(1, Number.isFinite(wlSpan)? wlSpan:1)) * 100)) + '%', background: amount>=wlSpan? '#22c55e' : amount>=dlSpan? '#eab308' : '#ef4444'}}></div></div>
+                <div style={{display:'flex', justifyContent:'space-between', fontSize:12, color:'var(--muted)', marginTop:4}}><span>0</span><span>WL ${formatMoney(wlSpan)}</span></div>
+              </div>
+              <div style={{marginTop:12}}>
+                <div style={{fontWeight:600, fontSize:14, marginBottom:6}}>My Active Bids</div>
+                <ul style={{listStyle:'none', padding:0, margin:0}}>
+                  {mySimu.length===0 && <li style={{color:'#6b7280', padding:'16px 0'}}>No bids yet.</li>}
+                  {mySimu.map(function(b){
+                    var s=statusForSimu(b);
+                    return (
                       <li key={b.id} style={{display:'flex', justifyContent:'space-between', alignItems:'center', padding:'10px 0', borderTop:'1px solid #eee'}}>
                         <div>
                           <div style={{fontWeight:600}}>{b.span} units / ${formatMoney(b.value)}</div>
@@ -330,102 +452,117 @@
                         </div>
                         <span className={"badge "+(s==="WINNING"?"badge-win":s==="LIVE"?"badge-live":"badge-dead")}>{s}</span>
                       </li>
-                    );})}
-                  </ul>
-                </div>
-              </div>
-
-              <div className="card">
-                <div style={{fontWeight:700, marginBottom:8}}>Current Winning Allocation</div>
-                {(() => { const ids = simu.currentWinningBidIds(); if (!ids.length) return <div style={{color:'#6b7280'}}>No winners yet - place some bids.</div>;
-                  return <ul style={{listStyle:'none', padding:0, margin:0}}>{ids.map(id=>{ const b=simu.bids.get(id);
-                    return (<li key={id} style={{display:'flex', justifyContent:'space-between', padding:'8px 0', borderTop:'1px solid #eee'}}>
-                      <div><div style={{fontSize:14}}><span style={{fontWeight:600}}>{b.bidderId}</span> · {b.span} units</div><div style={{fontSize:12, color:'#6b7280'}}>bid id {b.id.slice(0,7)}</div></div>
-                      <div style={{fontWeight:700}}>${formatMoney(b.value)}</div>
-                    </li>);
-                  })}</ul>;
-                })()}
-                <div className="card" style={{marginTop:12, background:'#fafafa'}}>
-                  <div style={{fontWeight:600, marginBottom:6}}>Ledger (mock)</div>
-                  <div style={{fontSize:14, color:'#6b7280'}}>In production, each bid would emit a chain event and hash to a Fabric ledger.</div>
-                  <button className="btn btn-muted" style={{marginTop:8}}>Verify latest block (mock)</button>
-                </div>
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="card">
-                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8}}>
-                  <div style={{fontWeight:700}}>West Auctions - First {items.length} Lots</div>
-                  <div style={{fontSize:12, color:'var(--am-blue)'}}>{xor? "MISU-XOR" : "MISU-OR"}</div>
-                </div>
-                <div style={{fontSize:13, color:'var(--muted)', marginBottom:6}}>CSV is preloaded. Edit below to adjust or paste your own lines (Title | image URL).</div>
-                <textarea className="input" style={{height:120}} defaultValue={items.map(it=>(it.title+(it.img? " | "+it.img:""))).join("\n")} onBlur={e=>{ const lines=e.target.value.split(/\n+/).map(s=>s.trim()).filter(Boolean); const arr=lines.map((line,idx)=>{ const [title,img]=line.split(/\s*\|\s*/); return { id:idx, title:title||("Lot "+(idx+1)), img: (img||"").trim()||undefined }; }); setItems(arr.slice(0,48)); }}/>
-                <div style={{marginTop:8}}>
-                  <div style={{fontSize:13, color:'var(--muted)'}}>Select lots (e.g., 1,3,5-7)</div>
-                  <div style={{display:'flex', gap:8, marginTop:6}}>
-                    <input className="input" value={sel} onChange={e=>setSel(e.target.value)}/>
-                    <input className="input" type="number" min="0" style={{width:120}} value={bundle} onChange={e=>setBundle(Math.max(0,parseInt(e.target.value||"0",10)))}/>
-                    <button className="btn btn-blue" onClick={()=>addMisuBidFromSelection(sel,bundle)}>Bid</button>
-                    <button className="btn btn-orange" onClick={simulateExternalMisu}>Sim Opp</button>
-                  </div>
-                  <div style={{fontSize:12, color:'#6b7280', marginTop:6}}>WL(S) = REV(U) - REV(U\S{xor?'; banned bidder':''}) · DL(S) = {xor? 'REV_XOR(S; banned bidder)' : 'REV(S)'} · Winners exact.</div>
-                </div>
-              </div>
-
-              <div className="card">
-                <div style={{fontWeight:700, marginBottom:8}}>Bidder Feedback</div>
-                <div style={{display:'grid', gap:6, fontSize:14}}><div style={{display:'flex', justifyContent:'space-between'}}><span>Total auction revenue</span><b>${formatMoney(misuRevenue)}</b></div></div>
-                <div style={{marginTop:8, fontSize:14, color:'var(--muted)'}}>Place a bid to see its exact WL/DL and status under {xor? "XOR" : "OR"}.</div>
-                <div style={{fontWeight:700, marginTop:12, marginBottom:6}}>My MISU Bids</div>
-                <ul style={{listStyle:'none', padding:0, margin:0}}>
-                  {misuFeed.map(b=>{ const wl=misu.WL_forBid(b); const dl=misu.DL_forBid(b); const stat = misu.winningIds().includes(b.id)? "WINNING" : (b.value>=dl? "LIVE":"DEAD"); return (
-                    <li key={b.id} style={{display:'flex', justifyContent:'space-between', alignItems:'center', padding:'10px 0', borderTop:'1px solid #eee'}}>
-                      <div>
-                        <div style={{fontSize:14}}><span style={{fontWeight:600}}>{b.bidderId===myId? "You": b.bidderId}</span> · lots {b.items.map(i=>i+1).join(", ")} · WL ${formatMoney(wl)} · DL ${formatMoney(dl)}</div>
-                        <div style={{fontSize:12, color:'#6b7280'}}>bid id {b.id.slice(0,7)}</div>
-                      </div>
-                      <div style={{display:'flex', alignItems:'center', gap:8}}><span className={"badge "+(stat==="WINNING"?"badge-win":stat==="LIVE"?"badge-live":"badge-dead")}}>{stat}</span><b>${formatMoney(b.value)}</b></div>
-                    </li>
-                  );})}
+                    );
+                  })}
                 </ul>
               </div>
+            </div>
 
-              <div className="card">
-                <div style={{fontWeight:700, marginBottom:8}}>Lots</div>
-                <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, maxHeight:460, overflow:'auto'}}>
-                  {items.map(it=> (
+            <div className="card">
+              <div style={{fontWeight:700, marginBottom:8}}>Current Winning Allocation</div>
+              { (function(){
+                var ids = simu.currentWinningBidIds(); if (!ids.length) return <div style={{color:'#6b7280'}}>No winners yet - place some bids.</div>;
+                return <ul style={{listStyle:'none', padding:0, margin:0}}>{ids.map(function(id){
+                  var b=simu.bids.get(id);
+                  return (
+                    <li key={id} style={{display:'flex', justifyContent:'space-between', padding:'8px 0', borderTop:'1px solid #eee'}}>
+                      <div><div style={{fontSize:14}}><span style={{fontWeight:600}}>{b.bidderId}</span> · {b.span} units</div><div style={{fontSize:12, color:'#6b7280'}}>bid id {b.id.slice(0,7)}</div></div>
+                      <div style={{fontWeight:700}}>${formatMoney(b.value)}</div>
+                    </li>
+                  );
+                })}</ul>;
+              })()}
+              <div className="card" style={{marginTop:12, background:'#fafafa'}}>
+                <div style={{fontWeight:600, marginBottom:6}}>Ledger (mock)</div>
+                <div style={{fontSize:14, color:'#6b7280'}}>In production, each bid would emit a chain event and hash to a Fabric ledger.</div>
+                <button className="btn btn-muted" style={{marginTop:8}}>Verify latest block (mock)</button>
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="card">
+              <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8}}>
+                <div style={{fontWeight:700}}>West Auctions - First {items.length} Lots</div>
+                <div style={{fontSize:12, color:'var(--am-blue)'}}>{xor? "MISU-XOR" : "MISU-OR"}</div>
+              </div>
+              <div style={{fontSize:13, color:'var(--muted)', marginBottom:6}}>CSV is preloaded. Edit below to adjust or paste your own lines (Title | image URL).</div>
+              <textarea className="input" style={{height:120}} defaultValue={items.map(function(it){ return it.title + (it.img? " | "+it.img:""); }).join("\n")} onBlur={function(e){
+                var lines=e.target.value.split(/\n+/).map(function(s){return s.trim();}).filter(Boolean);
+                var arr=lines.map(function(line,idx){
+                  var parts=line.split(/\s*\|\s*/);
+                  var title=parts[0]||("Lot "+(idx+1));
+                  var img=(parts[1]||"").trim()||undefined;
+                  return { id:idx, title:title, img:img };
+                });
+                setItems(arr.slice(0,48));
+              }}/>
+              <div style={{marginTop:8}}>
+                <div style={{fontSize:13, color:'var(--muted)'}}>Select lots (e.g., 1,3,5-7)</div>
+                <div style={{display:'flex', gap:8, marginTop:6}}>
+                  <input className="input" value={sel} onChange={function(e){ setSel(e.target.value); }}/>
+                  <input className="input" type="number" min="0" style={{width:120}} value={bundle} onChange={function(e){ setBundle(Math.max(0,parseInt(e.target.value||"0",10))); }}/>
+                  <button className="btn btn-blue" onClick={function(){ addMisuBidFromSelection(sel,bundle); }}>Bid</button>
+                  <button className="btn btn-orange" onClick={simulateExternalMisu}>Sim Opp</button>
+                </div>
+                <div style={{fontSize:12, color:'#6b7280', marginTop:6}}>WL(S) = REV(U) - REV(U\S{xor?'; banned bidder':''}) · DL(S) = {xor? 'REV_XOR(S; banned bidder)' : 'REV(S)'} · Winners exact.</div>
+              </div>
+            </div>
+
+            <div className="card">
+              <div style={{fontWeight:700, marginBottom:8}}>Bidder Feedback</div>
+              <div style={{display:'grid', gap:6, fontSize:14}}>
+                <div style={{display:'flex', justifyContent:'space-between'}}><span>Total auction revenue</span><b>${formatMoney(misuRevenue)}</b></div>
+              </div>
+              <div style={{marginTop:8, fontSize:14, color:'var(--muted)'}}>Place a bid to see its exact WL/DL and status under {xor? "XOR" : "OR"}.</div>
+              <div style={{fontWeight:700, marginTop:12, marginBottom:6}}>My MISU Bids</div>
+              <ul style={{listStyle:'none', padding:0, margin:0}}>
+                {misuFeed.map(function(b){
+                  var wl=misu.WL_forBid(b); var dl=misu.DL_forBid(b);
+                  var stat = misu.winningIds().indexOf(b.id)>=0 ? "WINNING" : (b.value>=dl? "LIVE":"DEAD");
+                  return (
+                    <li key={b.id} style={{display:'flex', justifyContent:'space-between', alignItems:'center', padding:'10px 0', borderTop:'1px solid #eee'}}>
+                      <div>
+                        <div style={{fontSize:14}}><span style={{fontWeight:600}}>{b.bidderId===myId? "You": b.bidderId}</span> · lots {b.items.map(function(i){return i+1;}).join(", ")} · WL ${formatMoney(wl)} · DL ${formatMoney(dl)}</div>
+                        <div style={{fontSize:12, color:'#6b7280'}}>bid id {b.id.slice(0,7)}</div>
+                      </div>
+                      <div style={{display:'flex', alignItems:'center', gap:8}}><span className={"badge "+(stat==="WINNING"?"badge-win":stat==="LIVE"?"badge-live":"badge-dead")}>{stat}</span><b>${formatMoney(b.value)}</b></div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+
+            <div className="card">
+              <div style={{fontWeight:700, marginBottom:8}}>Lots</div>
+              <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, maxHeight:460, overflow:'auto'}}>
+                {items.map(function(it){
+                  return (
                     <div key={it.id} style={{border:'1px solid #eee', borderRadius:12, overflow:'hidden'}}>
                       {it.img ? <img src={it.img} alt={it.title} style={{width:'100%', height:96, objectFit:'cover'}}/> : <div style={{height:96, display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, color:'#6b7280'}}>No image</div>}
                       <div style={{padding:8, fontSize:12}}>{it.id+1}. {it.title}</div>
                     </div>
-                  ))}
-                </div>
+                  );
+                })}
               </div>
-            </>
-          )}
-        </div>
-      );
-    }
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
 
-    function Root(){ return <App/>; }
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<Root/>);
+  function Root(){ return <App/>; }
+  var root = ReactDOM.createRoot(document.getElementById('root'));
+  root.render(<Root/>);
 
-    // Tests
-    (function runTests(){
-      try {
-        console.group("Sandbox tests");
-        console.assert(formatMoney(undefined)==="", "formatMoney undefined ok");
-        console.assert(formatMoney(null)==="", "formatMoney null ok");
-        console.assert(formatMoney(NaN)==="", "formatMoney NaN ok");
-        console.assert(formatMoney(Infinity)==="∞", "formatMoney Infinity ok");
-        const se=new SimuOrEngine(4);
-        se.placeBid({id:"t1", bidderId:"A", span:2, value:100, time:0});
-        console.assert(se.REV[2]>=100, "SIMU REV updated");
-        console.groupEnd();
-      } catch(e) { console.error("Test harness error", e); }
-    })();
-  </script>
+  // Tiny smoke tests
+  (function(){
+    var se=new SimuOrEngine(4);
+    se.placeBid({id:"t1", bidderId:"A", span:2, value:100, time:0});
+    console.assert(se.REV[2]>=100, "SIMU REV updated");
+  })();
+</script>
+
 </body>
 </html>
